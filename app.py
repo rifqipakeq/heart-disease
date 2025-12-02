@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import OneHotEncoder, RobustScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from datetime import datetime
 
 st.set_page_config(
     page_title="HeartGuard AI",
@@ -38,21 +40,27 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 @st.cache_resource
-def build_model():
+def load_data():
     try:
-        df = pd.read_csv('heart.csv') 
+        df = pd.read_csv('heart.csv')
+        if df.duplicated().sum() > 0:
+            df.drop_duplicates(inplace=True)
+        return df
     except:
-        st.warning("File 'heart.csv' tidak ditemukan. Menggunakan data dummy untuk demo UI.")
-        return None 
+        st.warning("File 'heart.csv' tidak ditemukan.")
+        return None
 
-    if df.duplicated().sum() > 0:
-        df.drop_duplicates(inplace=True)
+@st.cache_resource
+def build_model():
+    df = load_data()
+    if df is None:
+        return None, None, None
 
     X = df.drop('target', axis=1)
     y = df['target']
 
     numerical_cols = ['age', 'thalach', 'oldpeak']
-    categorical_cols = ['sex', 'cp', 'fbs', 'exang', 'slope', 'ca', 'thal']
+    categorical_cols = ['sex', 'cp', 'exang', 'slope', 'ca', 'thal']
 
     preprocessor = ColumnTransformer(
         transformers=[
@@ -67,9 +75,28 @@ def build_model():
     ])
 
     model.fit(X, y)
-    return model
+    
+    # Get feature importance
+    feature_names = numerical_cols.copy()
+    encoder = preprocessor.named_transformers_['cat']
+    cat_features = encoder.get_feature_names_out(categorical_cols)
+    feature_names.extend(cat_features)
+    
+    importance = model.named_steps['classifier'].feature_importances_
+    
+    # Get transformed data (after encoding)
+    X_transformed = preprocessor.transform(X)
+    X_transformed_df = pd.DataFrame(X_transformed, columns=feature_names)
+    X_transformed_df['target'] = y.values
+    
+    return model, dict(zip(feature_names, importance)), X_transformed_df
 
-model = build_model()
+# Initialize session state for prediction history
+if 'prediction_history' not in st.session_state:
+    st.session_state.prediction_history = []
+
+model, feature_importance, df_encoded = build_model()
+df = load_data()
 
 col_head1, col_head2 = st.columns([1, 4])
 with col_head1:
@@ -117,7 +144,7 @@ input_data = {
 }
 input_df = pd.DataFrame(input_data, index=[0])
 
-tab1, tab2 = st.tabs(["📊 Hasil Prediksi", "ℹ️ Kamus Medis & Info"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Hasil Prediksi", "📈 Dashboard Analytics", "🎯 Feature Importance", "📜 Riwayat Prediksi", "ℹ️ Info Medis"])
 
 with tab1:
     if model is None:
@@ -126,6 +153,17 @@ with tab1:
         prediction = model.predict(input_df)[0]
         proba = model.predict_proba(input_df)[0]
         prob_percent = proba[1] * 100
+        
+        history_entry = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'age': age,
+            'sex': 'Laki-laki' if sex == 1 else 'Perempuan',
+            'cp': ['Typical Angina', 'Atypical Angina', 'Non-anginal Pain', 'Asymptomatic'][cp],
+            'thalach': thalach,
+            'probability': f"{prob_percent:.1f}%",
+            'prediction': 'Berisiko ⚠️' if prediction == 1 else 'Risiko Rendah ✅'
+        }
+        st.session_state.prediction_history.insert(0, history_entry)
         
         col_res1, col_res2 = st.columns([2, 1])
         
@@ -178,8 +216,176 @@ with tab1:
         st.info("👈 Silakan lengkapi data di sidebar kiri dan klik tombol **'Analisis Risiko'**.")
 
 with tab2:
+    st.header("📈 Dashboard Analytics")
+    
+    if df is not None:
+        col_metric1, col_metric2, col_metric3, col_metric4 = st.columns(4)
+        
+        with col_metric1:
+            st.metric("Total Pasien", len(df))
+        with col_metric2:
+            pct_disease = (df['target'].sum() / len(df) * 100)
+            st.metric("Persentase Berisiko", f"{pct_disease:.1f}%")
+        with col_metric3:
+            st.metric("Rata-rata Usia", f"{df['age'].mean():.1f} tahun")
+        with col_metric4:
+            st.metric("Rata-rata HR Max", f"{df['thalach'].mean():.0f} bpm")
+        
+        st.markdown("---")
+        
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.subheader("Distribusi Target (Penyakit Jantung)")
+            target_counts = df['target'].value_counts()
+            fig_target = go.Figure(data=[go.Pie(
+                labels=['Tidak Berisiko', 'Berisiko'],
+                values=[target_counts.get(0, 0), target_counts.get(1, 0)],
+                hole=0.4,
+                marker_colors=['#90EE90', '#FF6B6B']
+            )])
+            fig_target.update_layout(height=300)
+            st.plotly_chart(fig_target, use_container_width=True)
+        
+        with col_chart2:
+            st.subheader("Distribusi Jenis Kelamin")
+            sex_counts = df['sex'].value_counts()
+            fig_sex = go.Figure(data=[go.Bar(
+                x=['Perempuan', 'Laki-laki'],
+                y=[sex_counts.get(0, 0), sex_counts.get(1, 0)],
+                marker_color=['#FF69B4', '#4169E1']
+            )])
+            fig_sex.update_layout(height=300, showlegend=False)
+            st.plotly_chart(fig_sex, use_container_width=True)
+        
+        col_chart3, col_chart4 = st.columns(2)
+        
+        with col_chart3:
+            st.subheader("Distribusi Usia")
+            fig_age = px.histogram(df, x='age', nbins=20, 
+                                   color='target',
+                                   color_discrete_map={0: '#90EE90', 1: '#FF6B6B'},
+                                   labels={'target': 'Status', 'age': 'Usia', 'count': 'Jumlah'})
+            fig_age.update_layout(height=300)
+            st.plotly_chart(fig_age, use_container_width=True)
+        
+        with col_chart4:
+            st.subheader("Tipe Nyeri Dada vs Target")
+            cp_target = df.groupby(['cp', 'target']).size().reset_index(name='count')
+            fig_cp = px.bar(cp_target, x='cp', y='count', color='target',
+                           barmode='group',
+                           color_discrete_map={0: '#90EE90', 1: '#FF6B6B'},
+                           labels={'cp': 'Tipe Chest Pain', 'count': 'Jumlah', 'target': 'Status'})
+            fig_cp.update_layout(height=300)
+            st.plotly_chart(fig_cp, use_container_width=True)
+        
+        st.markdown("---")
+        st.subheader("📊 Korelasi Antar Fitur")
+        
+        st.markdown("**Sebelum Encoding & Scaling**")
+        numeric_cols_raw = df.select_dtypes(include=[np.number]).columns.tolist()
+        corr_matrix_raw = df[numeric_cols_raw].corr()
+        fig_corr_raw = px.imshow(corr_matrix_raw, 
+                            text_auto='.2f',
+                            color_continuous_scale='RdBu_r',
+                            aspect='auto',
+                            labels={'color': 'Correlation'})
+        fig_corr_raw.update_layout(height=500)
+        st.plotly_chart(fig_corr_raw, use_container_width=True)
+    
+        st.markdown("**Setelah Encoding & Scaling**")
+        if df_encoded is not None:
+            corr_matrix_encoded = df_encoded.corr()
+            
+            fig_corr_encoded = px.imshow(corr_matrix_encoded, 
+                                text_auto='.2f',
+                                color_continuous_scale='RdBu_r',
+                                aspect='auto',
+                                labels={'color': 'Correlation'})
+            fig_corr_encoded.update_layout(height=800) 
+            st.plotly_chart(fig_corr_encoded, use_container_width=True)
+                
+        
+    else:
+        st.warning("Data tidak tersedia untuk menampilkan analytics.")
+
+with tab3:
+    st.header("🎯 Feature Importance")
     st.markdown("""
-    ### 📚 Penjelasan Istilah Medis
+    Grafik ini menunjukkan seberapa penting setiap fitur dalam menentukan prediksi model Random Forest.
+    Semakin tinggi nilai importance, semakin besar pengaruh fitur tersebut terhadap hasil prediksi.
+    """)
+    
+    if feature_importance is not None:
+        importance_df = pd.DataFrame(list(feature_importance.items()), 
+                                    columns=['Feature', 'Importance'])
+        importance_df = importance_df.sort_values('Importance', ascending=True).tail(15)
+        
+        fig_importance = go.Figure(go.Bar(
+            x=importance_df['Importance'],
+            y=importance_df['Feature'],
+            orientation='h',
+            marker=dict(
+                color=importance_df['Importance'],
+                colorscale='Viridis',
+                showscale=True
+            )
+        ))
+        
+        fig_importance.update_layout(
+            title='Top 15 Fitur Paling Berpengaruh',
+            xaxis_title='Importance Score',
+            yaxis_title='Feature',
+            height=600,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig_importance, use_container_width=True)
+        
+        with st.expander("📊 Lihat Semua Feature Importance"):
+            full_importance_df = pd.DataFrame(list(feature_importance.items()), 
+                                             columns=['Feature', 'Importance'])
+            full_importance_df = full_importance_df.sort_values('Importance', ascending=False)
+            st.dataframe(full_importance_df, use_container_width=True)
+    else:
+        st.warning("Feature importance tidak tersedia.")
+
+with tab4:
+    st.header("📜 Riwayat Prediksi")
+    
+    if len(st.session_state.prediction_history) > 0:
+        st.success(f"Total prediksi yang telah dilakukan: **{len(st.session_state.prediction_history)}**")
+        
+        history_df = pd.DataFrame(st.session_state.prediction_history)
+        st.dataframe(history_df, use_container_width=True)
+        col_btn1, col_btn2 = st.columns([1, 5])
+        with col_btn1:
+            if st.button("🗑️ Hapus Riwayat"):
+                st.session_state.prediction_history = []
+                st.rerun()
+        
+        if len(history_df) > 0:
+            st.markdown("---")
+            st.subheader("Statistik Riwayat")
+            col_stat1, col_stat2, col_stat3 = st.columns(3)
+            
+            with col_stat1:
+                berisiko_count = history_df['prediction'].str.contains('Berisiko').sum()
+                st.metric("Total Berisiko", berisiko_count)
+            
+            with col_stat2:
+                aman_count = history_df['prediction'].str.contains('Risiko Rendah').sum()
+                st.metric("Total Risiko Rendah", aman_count)
+            
+            with col_stat3:
+                if 'age' in history_df.columns:
+                    st.metric("Rata-rata Usia", f"{history_df['age'].mean():.1f} tahun")
+    else:
+        st.info("Belum ada riwayat prediksi. Silakan lakukan prediksi terlebih dahulu di tab 'Hasil Prediksi'.")
+
+with tab5:
+    st.header("ℹ️ Informasi Medis")
+    st.markdown("""
     Agar hasil prediksi lebih mudah dipahami, berikut adalah penjelasan singkat parameter yang digunakan:
     
     #### 1. Age (Usia)
