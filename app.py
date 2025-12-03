@@ -8,6 +8,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import OneHotEncoder, RobustScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score,confusion_matrix, precision_score, recall_score, f1_score
 from datetime import datetime
 
 st.set_page_config(
@@ -54,7 +55,7 @@ def load_data():
 def build_model():
     df = load_data()
     if df is None:
-        return None, None, None
+        return None, None, None, None, None
 
     X = df.drop('target', axis=1)
     y = df['target']
@@ -62,6 +63,7 @@ def build_model():
     numerical_cols = ['age', 'thalach', 'oldpeak']
     categorical_cols = ['sex', 'cp', 'exang', 'slope', 'ca', 'thal']
 
+    # Preprocessing
     preprocessor = ColumnTransformer(
         transformers=[
             ('num', RobustScaler(), numerical_cols),
@@ -69,14 +71,43 @@ def build_model():
         ]
     )
 
+    # Split data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
     model = Pipeline(steps=[
         ('preprocessor', preprocessor),
-        ('classifier', RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42))
+        ('classifier', RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42,n_jobs=-1,criterion='entropy'))
     ])
 
-    model.fit(X, y)
+    # training model
+    model.fit(X_train, y_train)
     
-    # Get feature importance
+    # prediksi
+    y_pred = model.predict(X_test)
+    
+    X_train_transformed = preprocessor.transform(X_train)
+    X_test_transformed = preprocessor.transform(X_test)
+    # evaluasi
+    cm = confusion_matrix(y_test, y_pred)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, average='weighted')
+    recall = recall_score(y_test, y_pred, average='weighted')
+    f1 = f1_score(y_test, y_pred, average='weighted')
+    
+    metrics_dict = {
+        'confusion_matrix': cm,
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'y_test': y_test.values,
+        'y_pred': y_pred,
+        'X_test_shape': X_test.shape,  
+        'X_train_shape': X_train.shape,  
+        'X_test_transformed_shape': X_test_transformed.shape,  
+        'X_train_transformed_shape': X_train_transformed.shape  
+    }
+    # Feature importance
     feature_names = numerical_cols.copy()
     encoder = preprocessor.named_transformers_['cat']
     cat_features = encoder.get_feature_names_out(categorical_cols)
@@ -84,18 +115,16 @@ def build_model():
     
     importance = model.named_steps['classifier'].feature_importances_
     
-    # Get transformed data (after encoding)
     X_transformed = preprocessor.transform(X)
     X_transformed_df = pd.DataFrame(X_transformed, columns=feature_names)
     X_transformed_df['target'] = y.values
     
-    return model, dict(zip(feature_names, importance)), X_transformed_df
+    return model, dict(zip(feature_names, importance)), X_transformed_df, metrics_dict, X_test
 
-# Initialize session state for prediction history
 if 'prediction_history' not in st.session_state:
     st.session_state.prediction_history = []
 
-model, feature_importance, df_encoded = build_model()
+model, feature_importance, df_encoded, metrics, X_test = build_model()
 df = load_data()
 
 col_head1, col_head2 = st.columns([1, 4])
@@ -144,7 +173,7 @@ input_data = {
 }
 input_df = pd.DataFrame(input_data, index=[0])
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Hasil Prediksi", "📈 Dashboard Analytics", "🎯 Feature Importance", "📜 Riwayat Prediksi", "ℹ️ Info Medis"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Hasil Prediksi", "📈 Dashboard Analytics", "🎯 Feature Importance", "📋 Classification Report", "📜 Riwayat Prediksi", "ℹ️ Info Medis"])
 
 with tab1:
     if model is None:
@@ -351,6 +380,104 @@ with tab3:
         st.warning("Feature importance tidak tersedia.")
 
 with tab4:
+    st.header("🎯 Evaluasi Model")
+
+    
+    if metrics is not None:
+        st.info(f"""
+        **Informasi Dataset:**
+        - Training Set: {metrics['X_train_shape'][0]} samples, {metrics['X_train_transformed_shape'][1]} features
+        - Testing Set: {metrics['X_test_shape'][0]} samples, {metrics['X_test_transformed_shape'][1]} features
+        """)
+        
+        col_met1, col_met2, col_met3, col_met4 = st.columns(4)
+        
+        with col_met1:
+            st.metric("Accuracy", f"{metrics['accuracy']:.2%}")
+        with col_met2:
+            st.metric("Precision", f"{metrics['precision']:.2%}")
+        with col_met3:
+            st.metric("Recall", f"{metrics['recall']:.2%}")
+        with col_met4:
+            st.metric("F1-Score", f"{metrics['f1_score']:.2%}" )
+        
+        st.markdown("---")
+        
+        st.subheader("📊 Confusion Matrix")
+        
+        col_cm1, col_cm2 = st.columns([2, 1])
+        
+        with col_cm1:
+            cm = metrics['confusion_matrix']
+            
+            fig_cm = go.Figure(data=go.Heatmap(
+                z=cm,
+                x=['Predicted: No Disease', 'Predicted: Disease'],
+                y=['Actual: No Disease', 'Actual: Disease'],
+                text=cm,
+                texttemplate='%{text}',
+                textfont={"size": 20},
+                colorscale='Blues',
+                showscale=True
+            ))
+            
+            fig_cm.update_layout(
+                title='Confusion Matrix - Random Forest',
+                xaxis_title='Predicted Label',
+                yaxis_title='Actual Label',
+                height=400,
+                font=dict(size=12)
+            )
+            
+            st.plotly_chart(fig_cm, use_container_width=True)
+        
+        with col_cm2:
+            st.write("")
+            st.write("")
+            st.info("""
+            **Penjelasan Confusion Matrix:**
+            
+            * **True Negative (TN):** Model benar memprediksi "Tidak Sakit"
+            * **False Positive (FP):** Model salah prediksi "Sakit" padahal "Tidak Sakit"
+            * **False Negative (FN):** Model salah prediksi "Tidak Sakit" padahal "Sakit"
+            * **True Positive (TP):** Model benar memprediksi "Sakit"
+            """)
+        
+        col_cm1, col_cm2, col_cm3, col_cm4 = st.columns(4)
+        tn, fp, fn, tp = cm.ravel()
+        col_cm1.metric("True Negative", tn)
+        col_cm2.metric("False Positive", fp)
+        col_cm3.metric("False Negative", fn)
+        col_cm4.metric("True Positive", tp)
+        
+        st.markdown("---")
+        
+        st.subheader("📖 Penjelasan Metrik Evaluasi")
+        
+        col_exp1, col_exp2 = st.columns(2)
+        
+        with col_exp1:
+            st.markdown("""
+            **Accuracy (Akurasi)**  
+            Proporsi prediksi yang benar dari keseluruhan prediksi.
+            
+            **Precision (Presisi)**  
+            Dari semua prediksi positif, berapa banyak yang benar-benar positif.
+            """)
+        
+        with col_exp2:
+            st.markdown("""
+            **Recall (Sensitivitas)**  
+            Dari semua data positif sebenarnya, berapa banyak yang berhasil diprediksi.
+            
+            **F1-Score**  
+            Rata-rata harmonis antara Precision dan Recall.
+            """)
+    else:
+        st.warning("Metrics tidak tersedia. Pastikan model sudah dibangun dengan benar.")
+
+
+with tab5:
     st.header("📜 Riwayat Prediksi")
     
     if len(st.session_state.prediction_history) > 0:
@@ -383,7 +510,7 @@ with tab4:
     else:
         st.info("Belum ada riwayat prediksi. Silakan lakukan prediksi terlebih dahulu di tab 'Hasil Prediksi'.")
 
-with tab5:
+with tab6:
     st.header("ℹ️ Informasi Medis")
     st.markdown("""
     Agar hasil prediksi lebih mudah dipahami, berikut adalah penjelasan singkat parameter yang digunakan:
