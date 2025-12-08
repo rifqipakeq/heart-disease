@@ -57,37 +57,38 @@ def build_model():
     if df is None:
         return None, None, None, None, None
 
-    X = df.drop('target', axis=1)
-    y = df['target']
+    df_clean = df.drop_duplicates()
+    
+    features_to_drop = ['trestbps', 'chol', 'fbs', 'restecg']
+    df_clean = df_clean.drop(columns=features_to_drop, errors='ignore')
+    
+    X = df_clean.drop('target', axis=1)
+    y = df_clean['target']
 
     numerical_cols = ['age', 'thalach', 'oldpeak']
     categorical_cols = ['sex', 'cp', 'exang', 'slope', 'ca', 'thal']
 
-    # Preprocessing
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', RobustScaler(), numerical_cols),
-            ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_cols)
-        ]
-    )
+    ohe = OneHotEncoder(handle_unknown='ignore', sparse_output=False)
+    encoded_array = ohe.fit_transform(X[categorical_cols])
+    feature_names_encoded = ohe.get_feature_names_out(categorical_cols)
+    df_encoded = pd.DataFrame(encoded_array, columns=feature_names_encoded, index=X.index)
+    
+    X_processed = X.drop(columns=categorical_cols)
+    X_processed = pd.concat([X_processed, df_encoded], axis=1)
+    
+    scaler = RobustScaler()
+    X_processed[numerical_cols] = scaler.fit_transform(X_processed[numerical_cols])
 
     # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.2, random_state=42)
+    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1, criterion='entropy')
 
-    model = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('classifier', RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42,n_jobs=-1,criterion='entropy'))
-    ])
-
-    # training model
     model.fit(X_train, y_train)
     
-    # prediksi
+    # Prediksi
     y_pred = model.predict(X_test)
     
-    X_train_transformed = preprocessor.transform(X_train)
-    X_test_transformed = preprocessor.transform(X_test)
-    # evaluasi
+    # Evaluasi
     cm = confusion_matrix(y_test, y_pred)
     accuracy = accuracy_score(y_test, y_pred)
     precision = precision_score(y_test, y_pred, average='weighted')
@@ -101,30 +102,32 @@ def build_model():
         'recall': recall,
         'f1_score': f1,
         'y_test': y_test.values,
-        'y_pred': y_pred,
+        'y_pred': y_pred,   
         'X_test_shape': X_test.shape,  
         'X_train_shape': X_train.shape,  
-        'X_test_transformed_shape': X_test_transformed.shape,  
-        'X_train_transformed_shape': X_train_transformed.shape  
+        'X_test_transformed_shape': X_train.shape,  
+        'X_train_transformed_shape': X_train.shape  
     }
+    
     # Feature importance
-    feature_names = numerical_cols.copy()
-    encoder = preprocessor.named_transformers_['cat']
-    cat_features = encoder.get_feature_names_out(categorical_cols)
-    feature_names.extend(cat_features)
+    feature_names = X_processed.columns.tolist()
+    importance = model.feature_importances_
     
-    importance = model.named_steps['classifier'].feature_importances_
-    
-    X_transformed = preprocessor.transform(X)
-    X_transformed_df = pd.DataFrame(X_transformed, columns=feature_names)
+    # Membuat dataframe gabungan fitur dan target untuk analisis korelasi
+    X_transformed_df = X_processed.copy()
     X_transformed_df['target'] = y.values
     
-    return model, dict(zip(feature_names, importance)), X_transformed_df, metrics_dict, X_test
+    # Return model
+    return (model, scaler, ohe, feature_names_encoded), dict(zip(feature_names, importance)), X_transformed_df, metrics_dict, X_test
 
 if 'prediction_history' not in st.session_state:
     st.session_state.prediction_history = []
 
-model, feature_importance, df_encoded, metrics, X_test = build_model()
+model_tuple, feature_importance, df_encoded, metrics, X_test = build_model()
+if model_tuple is not None:
+    model, scaler, ohe, feature_names_encoded = model_tuple
+else:
+    model, scaler, ohe, feature_names_encoded = None, None, None, None
 df = load_data()
 
 col_head1, col_head2 = st.columns([1, 4])
@@ -155,7 +158,6 @@ with st.sidebar.form("patient_form"):
     col_side1, col_side2 = st.columns(2)
     with col_side1:
         exang = st.checkbox("Angina Olahraga?", help="Nyeri dada saat berolahraga")
-        fbs = st.checkbox("Gula Darah > 120?", help="Fasting Blood Sugar > 120 mg/dl")
     
     with col_side2:
         slope = st.selectbox("Slope ST", [0, 1, 2], help="Kemiringan segmen ST latihan puncak")
@@ -169,7 +171,7 @@ with st.sidebar.form("patient_form"):
 input_data = {
     'age': age, 'sex': sex, 'cp': cp, 'thalach': thalach,
     'exang': 1 if exang else 0, 'oldpeak': oldpeak, 'slope': slope,
-    'ca': ca, 'thal': thal, 'fbs': 1 if fbs else 0
+    'ca': ca, 'thal': thal
 }
 input_df = pd.DataFrame(input_data, index=[0])
 
@@ -179,8 +181,23 @@ with tab1:
     if model is None:
         st.error("Model belum siap. Pastikan file 'heart.csv' sudah diupload ke GitHub.")
     elif submit_btn:
-        prediction = model.predict(input_df)[0]
-        proba = model.predict_proba(input_df)[0]
+        features_to_drop = ['trestbps', 'chol', 'fbs', 'restecg']
+        input_processed = input_df.drop(columns=features_to_drop, errors='ignore')
+        
+        # Encoding categorical features
+        categorical_cols = ['sex', 'cp', 'exang', 'slope', 'ca', 'thal']
+        encoded_input = ohe.transform(input_processed[categorical_cols])
+        df_encoded_input = pd.DataFrame(encoded_input, columns=feature_names_encoded, index=input_processed.index)
+        
+        input_processed = input_processed.drop(columns=categorical_cols)
+        input_processed = pd.concat([input_processed, df_encoded_input], axis=1)
+        
+        numerical_cols = ['age', 'thalach', 'oldpeak']
+        input_processed[numerical_cols] = scaler.transform(input_processed[numerical_cols])
+        
+        # Prediksi
+        prediction = model.predict(input_processed)[0]
+        proba = model.predict_proba(input_processed)[0]
         prob_percent = proba[1] * 100
         
         history_entry = {
@@ -425,6 +442,7 @@ with tab4:
                 title='Confusion Matrix - Random Forest',
                 xaxis_title='Predicted Label',
                 yaxis_title='Actual Label',
+                yaxis=dict(autorange="reversed"),
                 height=400,
                 font=dict(size=12)
             )
@@ -545,18 +563,12 @@ with tab6:
     Jumlah pembuluh koroner besar yang terlihat menyempit pada fluoroskopi (0–3).
     Semakin banyak pembuluh yang tersumbat → semakin tinggi risiko penyakit jantung.
                 
-    #### 7. Fasting Blood Sugar (fbs)
-    Apakah gula darah puasa > 120 mg/dl?
-    * **1 = Ya (tinggi)**
-    * **0 = Tidak**
-    Gula darah tinggi berhubungan dengan resistensi insulin dan penyakit jantung.
-
-    #### 8. Exercise-Induced Angina (exang)
+    #### 7. Exercise-Induced Angina (exang)
     Nyeri dada yang muncul saat olahraga:
     * **1 = Ya**
     * **0 = Tidak**
                 
-    #### 9. Max Heart Rate Achieved (thalach)
+    #### 8. Max Heart Rate Achieved (thalach)
     Denyut jantung maksimum yang dicapai saat tes treadmill/olahraga.
     Nilai lebih rendah dari normal dapat mengindikasikan gangguan fungsi jantung.
     """)
